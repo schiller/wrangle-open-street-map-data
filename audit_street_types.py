@@ -38,7 +38,6 @@ mapping = { "Av": "Avenida",
             "Trav": "Travessa" }
             
 
-
 def audit_street_type(street_types, street_name):
     m = street_type_re.search(street_name)
     if m:

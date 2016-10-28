@@ -5,6 +5,8 @@ import re
 import codecs
 import json
 import os
+from process_address import handle_address
+from process_phones import handle_phone
 
 INPUT_DIR = 'input'
 INPUT_FILE = 'rio-de-janeiro_brazil.osm'
@@ -16,25 +18,7 @@ OUTPUT_PATH = '{0}/{1}.json'.format(OUTPUT_DIR, INPUT_FILE)
 
 CREATED = ["version", "changeset", "timestamp", "user", "uid"]
 
-mapping = { "Av": "Avenida",
-            "Av.": "Avenida",
-            "Est.": "Estrada",
-            "Estr.": "Estrada",
-            "estrada": "Estrada",
-            "Pca": u"Praça",
-            "Praca": u"Praça",
-            u"Pça": u"Praça",
-            u"Pça.": u"Praça",
-            "R.": "Rua",
-            "RUA": "Rua",
-            "rua": "Rua",
-            "Ruas": "Rua",
-            "Rue": "Rua",
-            "Rod.": "Rodovia",
-            "Trav": "Travessa" }
-
 problemchars = re.compile(r'[=\+/&<>;\'"\?%#$@\,\. \t\r\n]')
-street_type_re = re.compile(r'^\S+\.?(\b)?', re.IGNORECASE)
 
 
 def shape_attribute(node, k, v):
@@ -59,15 +43,6 @@ def shape_nd(node, tag):
         node['node_refs'] = list()
     node['node_refs'].append(tag.attrib.get('ref'))
     return node
-            
-
-def update_street_type(name):
-    m = street_type_re.search(name)
-    if m:
-        street_type = m.group()
-        if street_type in mapping:
-            name = street_type_re.sub(mapping[street_type], name)
-    return name
 
 
 def shape_tag(node, tag):
@@ -79,21 +54,27 @@ def shape_tag(node, tag):
     elif ':' in k:
         parts = k.split(':')
         if parts[0] == 'addr':
-            if len(parts) > 2:
-                return node
-            if parts[1] == 'street':
-                v = update_street_type(v)
-            if 'address' not in node:
-                node['address'] = dict()
-            node['address'][parts[1]] = v
+            node = handle_address(node, parts, v)
         else:
             k = '_'.join(parts)
             node[k] = v
     else:
         if k == 'type':
             k = 'type_tag'
+        if k == 'phone':
+            v = handle_phone(v)
         node[k] = v
     return node
+
+
+def handle_bicycle_parking_capacity(node):
+    """Converts bicycle_parking capacity to int."""
+    if ('amenity' in node) and (node['amenity'] == 'bicycle_parking'):
+        if 'capacity' in node:
+            try:
+                node['capacity'] = int(node['capacity'])
+            except ValueError:
+                node.pop('capacity')
 
 
 def shape_element(element):
@@ -109,6 +90,8 @@ def shape_element(element):
 
         for tag in element.iter('tag'):
             shape_tag(node, tag)
+
+        handle_bicycle_parking_capacity(node)
 
         return node
     else:
@@ -132,4 +115,5 @@ def process_map(pretty = False):
                     fo.write(json.dumps(el) + "\n")
 
 
-process_map()
+if __name__ == '__main__':
+    process_map()

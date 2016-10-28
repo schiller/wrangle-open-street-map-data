@@ -13,42 +13,132 @@ After the initial cleaning on the data from the downloaded xml file, it was impo
 mongoimport --db osm --collection rio --file rio-de-janeiro_brazil.osm.json
 ```
 
+The elements were structured like this:
+
+```json
+{
+"id": "2406124091",
+"type": "node",
+"created": {
+          "version":"2",
+          "changeset":"17206049",
+          "timestamp":"2013-08-03T16:43:42Z",
+          "user":"linuxUser16",
+          "uid":"1219059"
+        },
+"pos": [41.9757030, -87.6921867],
+"address": {
+          "housenumber": "5157",
+          "postcode": "24230-062",
+          "street": "Rua Moreira César"
+        },
+"amenity": "restaurant",
+"cuisine": "mexican",
+"name": "La Cabana De Don Luis",
+"phone": "+55-21-95757782"
+}
+```
+
 Analyzing a sample of the data, some problems showed up:
 
-- Tags with k="type";
-- String 'bicycle_parking' capacities
-- pprint.pprint method not printing Unicode characters properly
+- Tags with k="type" overriding the element's 'type' field;
+- String 'bicycle_parking' capacities instead of numbers;
+- Abbreviated street types in 'address.street' tag;
+- Many different formats in 'phone' field;
+- pprint.pprint method not printing Unicode characters properly.
 
-### Tags with k="type"
-Second level 'k' tags with the value 'type' were overriding the node['type'] field, which should equal 'node' or 'way' only. These tags were mapped to the node with the 'type_tag' key before being imported to mongodb.
+### Tags with k="type" overriding the element's 'type' field
+Second level 'k' tags with the value 'type' were overriding the element's 'type' field, which should equal 'node' or 'way' only. These tags were mapped to the element with the 'type_tag' key before being imported to mongodb.
 
-### String 'bicycle_parking' capacities
-Nodes representing bicycle parkings had their capacity fields as strings, which did not allow numeric operations I was willing to make with them. All of them represented numbers, except for one '§0' value. To solve this, I iterated over the mongodb collection, updating the values with the parsed integer values. Whenever the parsing failed, the 'capacity' field was removed. The code used for the removal is shown below:
-
+### String 'bicycle_parking' capacities instead of numbers
+Nodes representing bicycle parkings had their capacity fields as strings, which did not allow numeric operations I was willing to make with them. All of them represented numbers, except for one '§0' value. To solve this, I iterated over the xml file, updating the values with the parsed integer values. Whenever the parsing failed, the 'capacity' field was removed. The code used for the removal is shown below:
 
 ```python
-from pymongo import MongoClient
-
-def get_db(db_name):
-    client = MongoClient('localhost:27017')
-    db = client[db_name]
-    return db
-
-db = get_db('osm')
-
-nodes = db.rio.find({'amenity': 'bicycle_parking', 'capacity': {'$exists': 1}})
-
-for node in nodes:
-    try:
-        capacity = int(node['capacity'])
-        db.rio.update_one(
-            {'_id': node['_id']},
-            {'$set': {'capacity': capacity}})
-    except ValueError:
-        db.rio.update_one(
-            {'_id': node['_id']},
-            {'$unset': {'capacity': 1}})
+def handle_bicycle_parking_capacity(node):
+    if ('amenity' in node) and (node['amenity'] == 'bicycle_parking'):
+        if 'capacity' in node:
+            try:
+                node['capacity'] = int(node['capacity'])
+            except ValueError:
+                node.pop('capacity')
 ```
+
+### Abbreviated street types in 'address.street' tag
+There were several street names with it's type abbreviated, for example:
+```
+Estr. da Paciência
+Av Castelo Branco
+R. Miguel Gustavo
+```
+It is worth noting that in Portuguese the street types appear at the beginning of a street name, in contrast with English, where it appears at the end.
+To deal with this a mapping was created to convert abbreviations to complete street types:
+```python
+mapping = { "Av": "Avenida",
+            "Av.": "Avenida",
+            "Est.": "Estrada",
+            "Estr.": "Estrada",
+            "estrada": "Estrada",
+            "Pca": u"Praça",
+            "Praca": u"Praça",
+            u"Pça": u"Praça",
+            u"Pça.": u"Praça",
+            "R.": "Rua",
+            "RUA": "Rua",
+            "rua": "Rua",
+            "Ruas": "Rua",
+            "Rue": "Rua",
+            "Rod.": "Rodovia",
+            "Trav": "Travessa" }
+```
+After the update, the abbreviation problem was solved for almost all cases, excluding only stranger ones probably caused by human erroneous inputs.
+
+### Many different formats in 'phone' field
+The 'phone' field of most elements was filled with various different formats of phone number, and many times more than one phone number was inserted in the same field.
+To organize this data I defined a standard pattern for the phone values, and audited the file classifying the values into four groups: ok, wrong_separators, missing_area_code and other. The groups were defined by regular expressions as follows:
+#### ok
+```
+# +55 99 99999999
+phone_ok_re = re.compile(r'^\+55\s\d{2}\s\d{8,9}$')
+# 0800 999 9999
+phone_0800_ok_re = re.compile(r'^0800\s\d{3}\s\d{4}$')
+```
+#### wrong_separators
+```
+# 55-99-9-99999999
+wrong_separators_re = re.compile(r'^\D*55\D*\d{2}\D*(\d\D?)?\d{4}\D?\d{4}$')
+# +55-99-0800-999-9999
+wrong_separators_0800_re = re.compile(r'^\D*(55)?\D*(\d{2})?\D*0800\D?\d{3}\D?\d\D?\d{3}$')
+```
+#### missing_area_code
+```
+# missing +55 (Rio area codes start with 2)
+missing_ddi_re = re.compile(r'^\D*2\d\D*(\d\D?)?\d{4}\D?\d{4}$')
+# missing +55 2X
+missing_ddd_re = re.compile(r'^(\d\D?)?\d{4}\D?\d{4}$')
+```
+#### other
+    The remaining values.
+    
+Before the update of the values, which consisted in turning the phone values into a list of strings, removing non-alphanumeric values, including area codes and including spaces only when it was appropriated, the classification was like this:
+```json
+{
+  "missing_area_code": 72, 
+  "wrong_separators": 2055, 
+  "other": 41, 
+  "ok": 151
+}
+```
+and after the update it turned out like this:
+```json
+{
+  "missing_area_code": 18, 
+  "wrong_separators": 0, 
+  "other": 41, 
+  "ok": 2260
+}
+```
+With an upgrade from 6.5% to 97.5% of 'ok' values, I was content with the phones cleaning for this wrangling exercise.
+
 
 ### pprint.pprint method not printing Unicode characters properly
 This problem is not related to the data itself, but it was harming the wrangling process.
@@ -67,7 +157,22 @@ class MyPrettyPrinter(pprint.PrettyPrinter):
 ```
 
 ## Data Overview
-This section contains basic statistics about the dataset and the MongoDB queries used to gather them.
+This section contains basic statistics about the dataset and the MongoDB queries used to gather them. Some queries make use of the 'aggregate' function.
+
+
+```python
+from pymongo import MongoClient
+
+def get_db(db_name):
+    client = MongoClient('localhost:27017')
+    db = client[db_name]
+    return db
+
+def aggregate(db, pipeline):
+    return [doc for doc in db.rio.aggregate(pipeline)]
+
+db = get_db('osm')
+```
 
 ### File Sizes
 
@@ -124,9 +229,6 @@ This query uses the following 'aggregate' method:
 
 
 ```python
-def aggregate(db, pipeline):
-    return [doc for doc in db.rio.aggregate(pipeline)]
-
 distinct_users = [
     {'$group': {'_id': '$created.user'}},
     {'$group': {'_id': 'Distinct users:', 'count': {'$sum': 1}}}]
@@ -178,6 +280,13 @@ MyPrettyPrinter().pprint(result)
     
 
 ## Aditional Ideas
+
+### City validation based on postcodes
+The city and postcode values could be crosschecked when inputing a new address. Most countries have public APIs to retrieve addresses from postcodes, so it could be done, with the help of contributors around the world.
+
+### Phone format validator
+The Open Street Map input tool could have a phone format validator, varying from country to country, to avoid such a mess on the phones format 😉. It could also separate multiple phones with a standard separator, since it was one of the most difficult steps of the phone values wrangling.
+The fact that each country has a different standard format makes it difficult to implement this, but with the help of the open software community around Open Street Map it could be done.
 
 ### Variety.js
 The open-source tool Variety (https://github.com/variety/variety) allows the user get a sense of how the data is structured in a MongoDB schema. It does so by showing the number of occurences for each key on documents returned by a query.
@@ -252,8 +361,8 @@ MyPrettyPrinter().pprint(result)
      {_id: barbecue, count: 18},
      {_id: brazilian, count: 16},
      {_id: international, count: 12},
-     {_id: chinese, count: 8},
-     {_id: seafood, count: 8}]
+     {_id: seafood, count: 8},
+     {_id: chinese, count: 8}]
     
 
 ### 10 Most Common Religions
